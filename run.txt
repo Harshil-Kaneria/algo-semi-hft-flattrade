@@ -1,0 +1,4 @@
+# Step 1: Run the token helper (opens browser & updates trader_config.json)
+python d:\algo-semi-hft-flattrade\get_token.py
+# Step 2: Start your trading bot
+python d:\algo-semi-hft-flattrade\trader.py
