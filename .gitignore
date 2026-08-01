@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# Credentials and secrets - NEVER commit these
+trader_config.json
+*.key
+*.pem
+*.secret
+secrets.json
+
+# Runtime / session files
+symbol_cache.json
+trader_*.log
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Type checking
+.mypy_cache/
+
+# Tests
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
