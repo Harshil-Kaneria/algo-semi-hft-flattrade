@@ -3,19 +3,36 @@
 =============================================================================
 FLATTRADE DAILY TOKEN GENERATOR
 -----------------------------------------------------------------------------
-Flattrade session tokens (api_token / susertoken) expire every 24 hours.
+Flattrade uses the Noren OMS auth flow. Session tokens (susertoken) expire
+every 24 hours and must be refreshed each trading morning.
 
-This helper script:
-1. Reads FLATTRADE_USER_ID (and optionally API_KEY / API_SECRET) from .env.
-2. Opens the Flattrade Auth URL in your default web browser automatically.
-3. Accepts the redirected URL you paste after logging in.
-4. Extracts the request code, exchanges it with Flattrade for a session token.
-5. Writes the fresh FLATTRADE_API_TOKEN back to .env (NEVER to a committed file).
+HOW FLATTRADE AUTH WORKS (from official docs / pythonAPI repo):
+  1. You create a Pi API App once at https://wall.flattrade.in/login
+     → Pi Menu → Create New API Key
+     → Set a Redirect URL (e.g. http://localhost:8080)
+     → Note the generated API Key (app_key / client_id)
 
-Setup
------
-    cp .env.example .env          # first time
-    # fill in FLATTRADE_USER_ID in .env
+  2. Every morning: open the login URL in browser:
+         https://auth.flattrade.in/?app_key=<FLATTRADE_API_KEY>
+
+  3. Log in with User ID + Password + OTP.
+
+  4. Browser redirects to your Redirect URL with:
+         http://localhost:8080/?code=XXXXXX&client_id=...
+     The `code` in the URL IS the session token (susertoken).
+     No server-side secret exchange is needed — Flattrade does NOT have
+     a code→token exchange endpoint like some other brokers.
+
+  5. Call  api.set_session(userid=user_id, password='', usertoken=code)
+     to activate the session.
+
+This script automates steps 2–5 and saves FLATTRADE_API_TOKEN to .env.
+
+Setup (first time only)
+-----------------------
+    copy .env.example .env      (Windows)
+    cp   .env.example .env      (Linux/Mac)
+    # Then edit .env and fill in FLATTRADE_USER_ID and FLATTRADE_API_KEY
 
 Daily usage
 -----------
@@ -23,12 +40,9 @@ Daily usage
 =============================================================================
 """
 
-import hashlib
 import os
-import re
 import sys
 import urllib.parse
-import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -42,7 +56,9 @@ def _read_env() -> dict:
         if ENV_EXAMPLE.exists():
             import shutil
             shutil.copy(ENV_EXAMPLE, ENV_FILE)
-            print(f"[INFO] Created .env from .env.example. Edit it to add your credentials.")
+            print(f"[INFO] Created .env from .env.example — please fill in "
+                  f"FLATTRADE_USER_ID and FLATTRADE_API_KEY then re-run.")
+            sys.exit(0)
         else:
             ENV_FILE.write_text("", encoding="utf-8")
     env = {}
@@ -57,13 +73,13 @@ def _read_env() -> dict:
 
 def _save_env(updates: dict) -> None:
     """
-    Write updated key=value pairs into .env, preserving comments and existing lines.
-    New keys are appended; existing keys are updated in-place.
+    Write updated key=value pairs into .env, preserving comments and existing
+    lines. New keys are appended; existing keys are updated in-place.
     """
-    existing_lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
-    written = set()
+    existing = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
+    written: set = set()
     new_lines = []
-    for raw in existing_lines:
+    for raw in existing:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             new_lines.append(raw)
@@ -74,7 +90,6 @@ def _save_env(updates: dict) -> None:
             written.add(key)
         else:
             new_lines.append(raw)
-    # Append any new keys not already in file
     for key, val in updates.items():
         if key not in written:
             new_lines.append(f"{key}={val}")
@@ -88,85 +103,70 @@ def main():
 
     env = _read_env()
     user_id = env.get("FLATTRADE_USER_ID", "").strip()
-    api_key = env.get("FLATTRADE_API_KEY", "").strip() or user_id
-    api_secret = env.get("FLATTRADE_API_SECRET", "").strip()
+    api_key = env.get("FLATTRADE_API_KEY", "").strip()
 
-    if not user_id or not user_id.strip():
-        user_id = input("Enter your Flattrade User ID: ").strip()
-        api_key = user_id
+    # Prompt for missing required values
+    if not user_id:
+        user_id = input("\nEnter your Flattrade User ID (e.g. FT12345): ").strip()
+        if not user_id:
+            print("[ERROR] User ID is required.")
+            sys.exit(1)
         _save_env({"FLATTRADE_USER_ID": user_id})
+        print(f"[INFO] Saved FLATTRADE_USER_ID to {ENV_FILE}")
 
+    if not api_key:
+        print("\n[INFO] FLATTRADE_API_KEY not set in .env.")
+        print("  Create a Pi API app at: https://wall.flattrade.in/login")
+        print("  → Pi Menu → Create New API Key → set Redirect URL → copy API Key")
+        api_key = input("Enter your Pi API Key (app_key): ").strip()
+        if not api_key:
+            print("[ERROR] API Key is required.")
+            sys.exit(1)
+        _save_env({"FLATTRADE_API_KEY": api_key})
+        print(f"[INFO] Saved FLATTRADE_API_KEY to {ENV_FILE}")
+
+    # Build auth URL using the Pi app_key (this is the official Flattrade flow)
     auth_url = f"https://auth.flattrade.in/?app_key={api_key}"
-    print(f"\n1. Opening login URL in your web browser:\n   {auth_url}\n")
+
+    print(f"\n1. Opening Flattrade login in your browser:\n   {auth_url}\n")
     webbrowser.open(auth_url)
 
-    print("2. Log in with your Flattrade User ID, Password, and OTP / 2FA.")
-    print("3. After logging in, copy the FULL URL from your browser address bar.")
-    print("   (It will look like: https://127.0.0.1/?code=XXXXXX&client_id=...)\n")
+    print("2. Log in with:  User ID + Password + OTP / 2FA")
+    print("3. After login, your browser redirects to your Redirect URL.")
+    print("   The URL will look like:")
+    print("       http://localhost:8080/?code=XXXXXX&client_id=...")
+    print("4. Copy the FULL redirected URL (or just the code value).\n")
 
-    redirected_input = input("Paste the redirected URL (or code): ").strip()
-
+    redirected_input = input("Paste the redirected URL (or just the code): ").strip()
     if not redirected_input:
-        print("[ERROR] No URL or code entered.")
+        print("[ERROR] Nothing entered.")
         sys.exit(1)
 
-    code = redirected_input
-
-    # If full URL pasted, extract code or token
-    if "http://" in redirected_input or "https://" in redirected_input or "?" in redirected_input:
+    # Extract the code from URL if a full URL was pasted
+    token = redirected_input
+    if "?" in redirected_input or "//" in redirected_input:
         parsed = urllib.parse.urlparse(redirected_input)
         params = urllib.parse.parse_qs(parsed.query)
+        # Flattrade redirect: ?code=XXXXX (code IS the susertoken directly)
         if "code" in params:
-            code = params["code"][0]
+            token = params["code"][0]
         elif "token" in params:
             token = params["token"][0]
-            print(f"\n[SUCCESS] Extracted token directly from URL: {token[:10]}...")
-            _save_env({"FLATTRADE_API_TOKEN": token})
-            print(f"[SUCCESS] Saved FLATTRADE_API_TOKEN to {ENV_FILE}")
-            return
+        elif "susertoken" in params:
+            token = params["susertoken"][0]
 
+    token = token.strip()
+    if not token:
+        print("[ERROR] Could not extract a token from the input.")
+        sys.exit(1)
 
-    code = code.strip()
-    print(f"\nExtracted Request Code: {code}")
-
-    # Check if api_secret exists for 2-step token exchange
-    if not api_secret:
-        api_secret = input("\nEnter your Flattrade API Secret (or press Enter to use code directly): ").strip()
-        if api_secret:
-            _save_env({"FLATTRADE_API_SECRET": api_secret})
-
-    if api_secret:
-        print("Exchanging request code for session token via Flattrade API...")
-        raw_str = api_key + code + api_secret
-        api_hash = hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
-
-        token_url = "https://piconnect.flattrade.in/NorenWClientTP/Token"
-        payload = f'jData={urllib.parse.quote(str({"api_key": api_key, "request_code": code, "api_secret": api_hash}))}'.encode("utf-8")
-        import json as _json
-        payload = _json.dumps({
-            "api_key": api_key,
-            "request_code": code,
-            "api_secret": api_hash,
-        }).encode("utf-8")
-
-        req = urllib.request.Request(token_url, data=payload, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                res_data = _json.loads(resp.read().decode("utf-8"))
-                if res_data.get("stat") == "Ok" and res_data.get("token"):
-                    token = res_data["token"]
-                    print(f"\n[SUCCESS] Session token generated: {token[:10]}...")
-                    _save_env({"FLATTRADE_API_TOKEN": token})
-                    print(f"[SUCCESS] Saved FLATTRADE_API_TOKEN to {ENV_FILE}")
-                    return
-                else:
-                    print(f"[WARN] Token exchange API returned: {res_data}")
-        except Exception as exc:
-            print(f"[WARN] API token exchange request failed: {exc}")
-
-    # Fallback: store code directly as api_token
-    _save_env({"FLATTRADE_API_TOKEN": code})
-    print(f"\n[SUCCESS] Saved FLATTRADE_API_TOKEN to {ENV_FILE}")
+    # Save to .env — the code from the redirect IS the susertoken.
+    # Flattrade does NOT require a separate code→token API exchange.
+    # api.set_session(userid=user_id, password='', usertoken=token) is all that's needed.
+    _save_env({"FLATTRADE_API_TOKEN": token})
+    print(f"\n[SUCCESS] Token starts with: {token[:10]}...")
+    print(f"[SUCCESS] Saved FLATTRADE_API_TOKEN to {ENV_FILE}")
+    print(f"\nYou can now run:  python trader.py")
 
 
 if __name__ == "__main__":

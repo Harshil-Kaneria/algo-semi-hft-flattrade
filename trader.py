@@ -228,18 +228,22 @@ def load_config() -> Dict:
         cfg.setdefault(k, v)
 
     # ── Overlay credentials from environment variables ─────────────────────────
-    # Env vars take priority over anything in trader_config.json, so credentials
-    # can live exclusively in .env and never in a committed file.
+    # Env vars take priority over anything in trader_config.json.
+    # Flattrade auth flow:
+    #   FLATTRADE_USER_ID   → your broker login ID
+    #   FLATTRADE_API_KEY   → Pi app_key (from wall.flattrade.in Pi portal)
+    #   FLATTRADE_API_TOKEN → susertoken from redirect code (set by get_token.py)
+    # No API secret is involved — Flattrade's redirect code IS the session token.
     env_map = {
         "FLATTRADE_USER_ID":   "user_id",
         "FLATTRADE_API_TOKEN": "api_token",
-        "FLATTRADE_API_KEY":   "api_key",
-        "FLATTRADE_API_SECRET":"api_secret",
+        "FLATTRADE_API_KEY":   "api_key",   # Pi app_key — used to build auth URL
     }
     for env_var, cfg_key in env_map.items():
         val = os.environ.get(env_var, "").strip()
         if val:
             cfg[cfg_key] = val
+
 
     validate_config(cfg)
     return cfg
