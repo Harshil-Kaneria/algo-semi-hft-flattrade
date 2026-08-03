@@ -142,58 +142,8 @@ log = logging.getLogger("HFT-TRADER")
 
 VALID_PRODUCT_TYPES = {"C", "M", "H", "B"}
 
-DEFAULT_CONFIG: Dict = {
-    # Flattrade credentials
-    "user_id": "YOUR_USER_ID",
-    "api_token": "YOUR_SESSION_TOKEN",
-    # Capital & risk
-    "capital": 100000,
-    "target_profit_inr": 180,
-    "stop_loss_inr": 100,
-    "max_daily_loss_inr": 500,
-    "max_trade_value_pct": 0.95,
-    # Rolling tick buffer — must be >= max(trend_lookback, min_ticks_for_signal)
-    "tick_window": 30,
-    "min_ticks_for_signal": 20,
-    "tick_size": 0.05,
-    "min_stock_price": 50,
-    "max_stock_price": 10000,
-    "order_fill_timeout_sec": 30,
-    "cooldown_sec": 10,
-    "scan_interval_sec": 1,
-    # Pullback entry (item 2)
-    "pullback_pct_min": 0.05,   # min % drop from local high to qualify
-    "pullback_lookback": 6,     # short window for dip detection
-    "trend_lookback": 20,       # wide window for linreg trend direction
-    # Signal weights (sum to 1.0)
-    "momentum_linreg_weight": 0.40,
-    "consistency_weight": 0.25,
-    "velocity_weight": 0.20,
-    "volume_surge_weight": 0.15,
-    # Market hours IST
-    "market_open_hhmm": "09:15",
-    "market_close_hhmm": "15:20",
-    "square_off_hhmm": "15:25",
-    # Exchange
-    "exchange": "NSE",
-    "product_type": "M",        # M=MIS/intraday; valid: C M H B
-    "nifty50_token": "26000",
-    # Transaction costs — NSE equity intraday (item 3)
-    "brokerage_flat_inr": 20.0,     # flat fee per order (both sides)
-    "exchange_txn_pct": 0.00345,    # % of turnover (both sides)
-    "sebi_pct": 0.0001,             # % of turnover (both sides)
-    "gst_pct": 18.0,                # % on (brokerage + exchange_txn) only
-    "stt_sell_pct": 0.025,          # % of turnover, SELL side ONLY (intraday)
-    "stamp_duty_buy_pct": 0.003,    # % of turnover, BUY side ONLY
-    # WebSocket reconnect (item 5)
-    "ws_max_reconnect_attempts": 10,
-    # REST reconciliation interval (item 4)
-    "reconcile_interval_sec": 10,
-    # Dry-run simulation (item 10)
-    "dry_run": False,
-}
-
 CONFIG_FILE = Path(__file__).parent / "trader_config.json"
+
 
 
 def validate_config(cfg: Dict) -> None:
@@ -216,34 +166,38 @@ def validate_config(cfg: Dict) -> None:
 
 
 def load_config() -> Dict:
+    """
+    Load configuration exclusively from trader_config.json.
+    Credentials (user_id, api_token, api_key) are injected on top via
+    environment variables loaded from .env by _load_env() at import time.
+    """
     if not CONFIG_FILE.exists():
-        CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=4), encoding="utf-8")
-        log.warning(
-            "Created config template at {}. "
-            "Set credentials in .env (see .env.example) then re-run.".format(CONFIG_FILE)
+        log.error(
+            "[CONFIG] trader_config.json not found at {}. "
+            "Create it from the repo template and re-run.".format(CONFIG_FILE)
         )
-        sys.exit(0)
-    cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    for k, v in DEFAULT_CONFIG.items():
-        cfg.setdefault(k, v)
+        sys.exit(1)
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        log.error("[CONFIG] trader_config.json is not valid JSON: {}".format(exc))
+        sys.exit(1)
 
     # ── Overlay credentials from environment variables ─────────────────────────
-    # Env vars take priority over anything in trader_config.json.
-    # Flattrade auth flow:
-    #   FLATTRADE_USER_ID   → your broker login ID
-    #   FLATTRADE_API_KEY   → Pi app_key (from wall.flattrade.in Pi portal)
-    #   FLATTRADE_API_TOKEN → susertoken from redirect code (set by get_token.py)
-    # No API secret is involved — Flattrade's redirect code IS the session token.
+    # Credentials live in .env ONLY — never in trader_config.json.
+    # Flattrade auth:
+    #   FLATTRADE_USER_ID   → broker login ID
+    #   FLATTRADE_API_KEY   → Pi app_key (wall.flattrade.in Pi portal)
+    #   FLATTRADE_API_TOKEN → daily susertoken from redirect code (get_token.py)
     env_map = {
         "FLATTRADE_USER_ID":   "user_id",
         "FLATTRADE_API_TOKEN": "api_token",
-        "FLATTRADE_API_KEY":   "api_key",   # Pi app_key — used to build auth URL
+        "FLATTRADE_API_KEY":   "api_key",
     }
     for env_var, cfg_key in env_map.items():
         val = os.environ.get(env_var, "").strip()
         if val:
             cfg[cfg_key] = val
-
 
     validate_config(cfg)
     return cfg
