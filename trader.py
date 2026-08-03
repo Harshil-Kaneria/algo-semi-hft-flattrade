@@ -22,12 +22,20 @@ What's new in v2
  9. Nifty-500 universe fetched live from NSE archives CSV at startup
 10. dry_run flag: simulates all order logic against live ticks, no real orders
 
+Credentials
+-----------
+    Copy .env.example → .env  and fill in FLATTRADE_USER_ID and FLATTRADE_API_TOKEN.
+    Run  python get_token.py  every morning to refresh the daily token.
+    The .env file is git-ignored and NEVER committed.
+
 Usage
 -----
-    pip install NorenRestApiPy numpy
-    python trader.py
+    pip install -r requirements.txt
+    python get_token.py      # refresh daily session token
+    python trader.py         # start the bot
 
 Config is read from trader_config.json (auto-created on first run).
+Credentials are read from .env (overrides any values in trader_config.json).
 =============================================================================
 """
 
@@ -67,6 +75,28 @@ try:
 except ImportError:
     print("[FATAL] numpy not installed.  Run: pip install numpy")
     sys.exit(1)
+
+# ── .env loader (python-dotenv preferred; manual fallback) ────────────────────
+def _load_env() -> None:
+    """
+    Load .env into os.environ so credentials never have to live in trader_config.json.
+    Uses python-dotenv when available; falls back to a simple manual parser.
+    """
+    env_file = Path(__file__).parent / ".env"
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv(dotenv_path=env_file, override=True)
+    except ImportError:
+        # Manual fallback — no external dependency required
+        if env_file.exists():
+            for raw in env_file.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                os.environ.setdefault(key.strip(), val.strip())
+
+_load_env()
 
 
 # ============================================================
@@ -188,11 +218,29 @@ def validate_config(cfg: Dict) -> None:
 def load_config() -> Dict:
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=4), encoding="utf-8")
-        log.warning("Created config template at {}. Fill credentials and re-run.".format(CONFIG_FILE))
+        log.warning(
+            "Created config template at {}. "
+            "Set credentials in .env (see .env.example) then re-run.".format(CONFIG_FILE)
+        )
         sys.exit(0)
     cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     for k, v in DEFAULT_CONFIG.items():
         cfg.setdefault(k, v)
+
+    # ── Overlay credentials from environment variables ─────────────────────────
+    # Env vars take priority over anything in trader_config.json, so credentials
+    # can live exclusively in .env and never in a committed file.
+    env_map = {
+        "FLATTRADE_USER_ID":   "user_id",
+        "FLATTRADE_API_TOKEN": "api_token",
+        "FLATTRADE_API_KEY":   "api_key",
+        "FLATTRADE_API_SECRET":"api_secret",
+    }
+    for env_var, cfg_key in env_map.items():
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            cfg[cfg_key] = val
+
     validate_config(cfg)
     return cfg
 
