@@ -1,0 +1,8 @@
+ssh ubuntu@161.118.186.210
+
+cd /opt/hft/algo-semi-hft-flattrade
+git pull
+
+# Run:
+/opt/hft/venv/bin/python get_token.py
+/opt/hft/venv/bin/python trader.py
