@@ -1,0 +1,12 @@
+[Unit]
+Description=Webhook listener for GitHub auto-deploy
+After=network.target
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/webhook -hooks /opt/webhook/hooks.json -port 9000 -verbose
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
