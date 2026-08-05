@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GitLab CI/CD Pipeline — Flattrade Semi-HFT Algo Trader
+#
+# HOW IT WORKS:
+#   - A GitLab Runner (shell executor) is installed ON your server.
+#   - When you push to main, GitLab triggers this pipeline.
+#   - The runner runs the deploy job DIRECTLY on the server.
+#   - No SSH keys in GitLab, no external tools — the runner IS on the server.
+# ─────────────────────────────────────────────────────────────────────────────
+
+stages:
+  - deploy
+
+deploy:
+  stage: deploy
+  only:
+    - main
+  tags:
+    - self-hosted        # must match the tag you give the runner during registration
+  script:
+    - echo "── Deploy started at $(date '+%Y-%m-%d %H:%M:%S') ──"
+    - cd /home/ubuntu/algo-semi-hft-flattrade
+    - git fetch origin main
+    - git reset --hard origin/main
+    - echo "── Deployed commit $(git rev-parse --short HEAD) ──"
+
+    # Optional — uncomment to restart the trader service after deploy:
+    # - sudo systemctl restart trader
