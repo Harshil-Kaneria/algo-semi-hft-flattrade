@@ -1,136 +1,124 @@
-# Auto-Deploy with GitLab Runner
+# Auto-Deploy Setup (GitHub + Ubuntu Server)
 
-When you push to `main` on GitLab, the pipeline automatically runs `git pull`
-on your server. The GitLab Runner is installed directly on your server — it
-picks up pipeline jobs and runs them **locally**, so no SSH keys or webhooks
-are needed.
+Your repo is on **GitHub**. Two options are available:
 
 ---
 
-## Architecture
+## ✅ Option A — GitHub Actions + SSH (Recommended)
 
+**How it works:**
 ```
-You push to main on GitLab
-         ↓
-GitLab triggers the pipeline (.gitlab-ci.yml)
-         ↓
-GitLab Runner (installed on your server) picks up the job
-         ↓
-Runner runs:  git reset --hard origin/main
-         ↓
-Server is always on latest main
+You push to main
+       ↓
+GitHub Actions starts a free runner
+       ↓
+Runner SSHes into YOUR server
+       ↓
+Runs:  git reset --hard origin/main
+       ↓
+Server is on latest main within ~30 seconds
 ```
+
+The pipeline file is already in the repo at `.github/workflows/deploy.yml`.
+You just need to do a **one-time server + GitHub setup** below.
 
 ---
 
-## One-time setup on your Ubuntu server
+### Step 1 — Clone the repo on your server
 
-SSH into your server and run all of these once.
-
-### Step 1 — Install GitLab Runner
+SSH into your Ubuntu server:
 ```bash
-# Download and add the GitLab Runner repo
-curl -L "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh" | sudo bash
-
-# Install
-sudo apt install -y gitlab-runner
-```
-
-### Step 2 — Clone the repo on the server
-```bash
-cd /home/ubuntu
-git clone https://gitlab.com/YOUR_GITLAB_USERNAME/algo-semi-hft-flattrade.git
+git clone https://github.com/Harshil-Kaneria/algo-semi-hft-flattrade.git
 cd algo-semi-hft-flattrade
 pip install -r requirements.txt
+cp .env.example .env
+nano .env   # fill in your Flattrade credentials
 ```
 
-### Step 3 — Register the Runner
-Get your registration token from GitLab:
-**Your repo → Settings → CI/CD → Runners → New project runner**
+---
 
-Then register:
+### Step 2 — Generate a deploy SSH key (on your server)
+
+Run this **on the server** (not your laptop):
 ```bash
-sudo gitlab-runner register
+ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/deploy_key -N ""
 ```
 
-You will be prompted for:
+This creates two files:
+- `~/.ssh/deploy_key` → **private key** (goes into GitHub)
+- `~/.ssh/deploy_key.pub` → **public key** (stays on server)
 
-| Prompt | What to enter |
+Add the public key to `authorized_keys` so GitHub can SSH in:
+```bash
+cat ~/.ssh/deploy_key.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Print the private key — you'll copy this into GitHub:
+```bash
+cat ~/.ssh/deploy_key
+```
+
+---
+
+### Step 3 — Add 3 secrets to GitHub
+
+Go to: **GitHub → Your repo → Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret name | Value |
 |---|---|
-| GitLab instance URL | `https://gitlab.com` |
-| Registration token | Paste the token from GitLab |
-| Description | `my-server` (any name) |
-| Tags | `self-hosted` ← **must match the tag in `.gitlab-ci.yml`** |
-| Executor | `shell` |
-
-### Step 4 — Allow the runner user to access the repo
-The runner runs as the `gitlab-runner` system user. Give it access to the repo:
-```bash
-sudo usermod -aG ubuntu gitlab-runner      # add to ubuntu group if needed
-sudo chown -R ubuntu:ubuntu /home/ubuntu/algo-semi-hft-flattrade
-sudo chmod -R g+rw /home/ubuntu/algo-semi-hft-flattrade
-```
-
-Or simpler — run the runner as the `ubuntu` user (recommended):
-```bash
-sudo gitlab-runner uninstall
-sudo gitlab-runner install --user=ubuntu --working-directory=/home/ubuntu
-sudo gitlab-runner start
-```
-
-### Step 5 — Confirm the runner is active
-```bash
-sudo gitlab-runner status
-```
-
-Go to GitLab → **Your repo → Settings → CI/CD → Runners** and you should see
-your runner listed as **Online** with a green dot.
+| `DEPLOY_HOST` | Your server's IP address (e.g. `123.45.67.89`) |
+| `DEPLOY_USER` | Your SSH username on the server (e.g. `ubuntu`) |
+| `DEPLOY_SSH_KEY` | The **entire output** of `cat ~/.ssh/deploy_key` (starts with `-----BEGIN`) |
+| `DEPLOY_PATH` | Full path to the repo on server (e.g. `/home/ubuntu/algo-semi-hft-flattrade`) |
 
 ---
 
-## One-time GitLab repo setup
+### Step 4 — Done. Test it.
 
-If your code is currently on **GitHub**, push a copy to GitLab:
+Push any change to main:
 ```bash
-# Add GitLab as a second remote
-git remote add gitlab https://gitlab.com/YOUR_GITLAB_USERNAME/algo-semi-hft-flattrade.git
-
-# Push to GitLab
-git push gitlab main
+git commit --allow-empty -m "test deploy"
+git push origin main
 ```
 
-Or just use GitLab as your primary remote going forward.
+Go to **GitHub → Actions tab** — you'll see the pipeline run and succeed (green ✅).
 
 ---
 
-## Daily workflow
+## 🔁 Option B — Cron Poll (Simplest, no GitHub config)
+
+If you don't want to touch GitHub settings at all, add a cron job on the server
+that checks for new commits every minute and pulls automatically:
 
 ```bash
-# Morning: refresh session token on the server
-cd /home/ubuntu/algo-semi-hft-flattrade
-python get_token.py
-
-# Afternoon: push code from your laptop
-git push origin main        # or:  git push gitlab main
-# → pipeline triggers → server auto-pulls → done
+# On your server — run this once:
+crontab -e
 ```
+
+Add this line:
+```cron
+* * * * * cd /home/ubuntu/algo-semi-hft-flattrade && git fetch origin main && git reset --hard origin/main >> /var/log/deploy.log 2>&1
+```
+
+No GitHub Secrets, no Actions, no SSH key setup. The server just polls GitHub
+every 60 seconds. Slight delay (up to 1 min) vs instant deploy with Option A.
 
 ---
 
-## Optional: auto-restart trader after deploy
+## Optional — Auto-restart trader after deploy
 
-Uncomment this line in `.gitlab-ci.yml`:
+For both options, uncomment this in `.github/workflows/deploy.yml` (Option A):
 ```yaml
-# - sudo systemctl restart trader
+# sudo systemctl restart trader
 ```
 
-Then allow the runner to restart without password:
+Or add to the cron command (Option B):
 ```bash
-echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart trader" \
-  | sudo tee /etc/sudoers.d/trader
+... && git reset --hard origin/main && sudo systemctl restart trader
 ```
 
-### Setting up trader.service
+### Set up trader as a systemd service
 ```bash
 sudo tee /etc/systemd/system/trader.service > /dev/null <<EOF
 [Unit]
@@ -151,4 +139,21 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now trader
+```
+
+Allow passwordless restart for GitHub Actions / cron:
+```bash
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart trader" \
+  | sudo tee /etc/sudoers.d/trader
+```
+
+---
+
+## Daily morning flow (refresh session token)
+
+```bash
+# On your server, every morning before market open:
+cd /home/ubuntu/algo-semi-hft-flattrade
+python get_token.py        # refreshes FLATTRADE_API_TOKEN in .env
+sudo systemctl restart trader
 ```
