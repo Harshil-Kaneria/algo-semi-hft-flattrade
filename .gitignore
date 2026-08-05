@@ -18,7 +18,7 @@ ENV/
 .env
 
 # Credentials and secrets - NEVER commit these
-trader_config.json
+# trader_config.json
 *.key
 *.pem
 *.secret
