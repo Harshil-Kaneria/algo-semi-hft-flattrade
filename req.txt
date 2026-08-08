@@ -1,0 +1,21 @@
+=> You're role - 
+    You are a good damnn quant hft and senior software engineer. now you need to make code based on below requirement. but before that read all skills in folder also make code in python make only one script we don't need ui for this we run from temninal it's self and there are logs that it but other functinality and prediction i want good damnn strong and more profitable 
+
+=> Review this broker docs and give me script reading below requirement.
+
+https://pi.flattrade.in/docs
+https://github.com/flattrade/pythonAPI
+
+- So idea was we watch all nifty 500 stock a same time and code automatically analysis higher probality of stock based on price changes for example
+
+[
+    "TCS" : [3100,3101,3100.5,3101.10,3101.40,3100.2]
+    "Reliance" : [1300,1305,1298,1301,1297,1302]
+    "HAL" : [500,500,499.90,500.10,500.05]
+]
+
+so in this case best fit for our case is - "Reliance" and you need to manage websocket data to maintain like this and identify the output 
+
+1. now we have 1,00,000 RS and we just want 180 rs profit in single trade so we just a need 0.18% moment so which is higher probality you need to make a order with TP/SL so TP for add 180 and SL 100 can calulcate price accodily also make order when you find chance with price like in Reliance case not chance to buy @ 1305 so for our profit we need to order @ 1300 beacuase we have changes 
+2. always find trend stock with nifty 50 like if we find Reliance then both stock and nifty 50 must be and same trend else skip this trade and start from again
+3. once trade is done then put another trade but remenber one trade a same time after SL or TP hit then only you need to make another trade based on above codition

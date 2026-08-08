@@ -36,5 +36,7 @@
     "reconcile_interval_sec": 10,
     "board_size": 5,
     "board_log_interval_sec": 10,
+    "margin_refresh_sec": 3600,
+    "fallback_margin_pct": 20.0,
     "dry_run": true
 }

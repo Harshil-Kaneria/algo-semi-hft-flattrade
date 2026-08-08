@@ -22,6 +22,7 @@ What's new in v2
  9. Nifty-500 universe fetched live from NSE archives CSV at startup
 10. dry_run flag: simulates all order logic against live ticks, no real orders
 11. Background candidate board (CandidateBoard): continuously updated top-N leaderboard of trade candidates; fast-fire entry with live re-validation
+12. Leverage-aware position sizing (MarginCache): queries get_security_info margin components to scale position sizes based on scrip leverage
 
 Credentials
 -----------
@@ -209,6 +210,8 @@ def load_config() -> Dict:
     cfg.setdefault("api_token", "YOUR_SESSION_TOKEN")
     cfg.setdefault("board_size", 5)
     cfg.setdefault("board_log_interval_sec", 10)
+    cfg.setdefault("margin_refresh_sec", 3600)
+    cfg.setdefault("fallback_margin_pct", 20.0)
 
     # ── Overlay credentials from environment variables ─────────────────────────
     # Credentials live in .env ONLY — never in trader_config.json.
@@ -448,6 +451,60 @@ class CandidateBoard:
 
 
 # ============================================================
+# MARGIN CACHE  (item 12)
+# ============================================================
+
+class MarginCache:
+    """
+    Fetches and caches security info (margin components) per scrip from Flattrade API.
+
+    NOTE ON LEVERAGE FORMULA:
+    Flattrade/Noren API returns margin component fields (varmrg, elmmrg, expmrg, etc.)
+    with no official documented formula for combining them. This implementation uses
+    margin_pct = max(fallback_margin_pct, varmrg + elmmrg + expmrg) as an APPROXIMATION.
+    Users should validate this against a manual MIS order in Flattrade before scaling.
+    """
+
+    def __init__(self, api: FlattradeClient, cfg: Dict):
+        self.api = api
+        self.exchange = cfg.get("exchange", "NSE")
+        self.refresh_sec = cfg.get("margin_refresh_sec", 3600)
+        self.fallback_pct = float(cfg.get("fallback_margin_pct", 20.0))
+        self._cache: Dict[str, Tuple[float, float]] = {}  # token -> (margin_pct, timestamp)
+        self._lock = threading.Lock()
+
+    def get_margin_pct(self, token: str) -> float:
+        now = time.time()
+        with self._lock:
+            if token in self._cache:
+                m_pct, cached_at = self._cache[token]
+                if now - cached_at < self.refresh_sec:
+                    return m_pct
+
+        m_pct = self._fetch_margin_pct(token)
+
+        with self._lock:
+            self._cache[token] = (m_pct, now)
+        return m_pct
+
+    def _fetch_margin_pct(self, token: str) -> float:
+        try:
+            res = self.api.get_security_info(exchange=self.exchange, token=token)
+            if res and isinstance(res, dict) and res.get("stat") == "Ok":
+                var_mrg = float(res.get("varmrg") or 0.0)
+                elm_mrg = float(res.get("elmmrg") or 0.0)
+                exp_mrg = float(res.get("expmrg") or 0.0)
+                sum_mrg = var_mrg + elm_mrg + exp_mrg
+                return max(self.fallback_pct, sum_mrg)
+        except Exception as exc:
+            log.warning(
+                "[MARGIN] get_security_info failed for token {}: {}. "
+                "Using fallback margin_pct={:.1f}%.".format(token, exc, self.fallback_pct)
+            )
+        return self.fallback_pct
+
+
+# ============================================================
 # SIGNAL ENGINE  (items 2 + original scoring)
 # ============================================================
 
@@ -684,12 +741,14 @@ class OrderManager:
         ledger: TradeLedger,
         session: SessionState,
         tick_store: "TickStore",
+        margin_cache: Optional["MarginCache"] = None,
     ):
         self.api = api
         self.cfg = cfg
         self.ledger = ledger
         self.session = session
         self.tick_store = tick_store
+        self.margin_cache = margin_cache
         self._lock = threading.Lock()
         self.state = OrderState.IDLE
         self.current: Optional[TradeRecord] = None
@@ -713,8 +772,15 @@ class OrderManager:
         ts = self.cfg["tick_size"]
         return round(round(p / ts) * ts, 2)
 
-    def _qty(self, price: float) -> int:
-        return max(1, int(self.cfg["capital"] * self.cfg["max_trade_value_pct"] // price))
+    def _qty(self, price: float, margin_pct: float = 20.0) -> int:
+        """
+        Compute leverage-adjusted order quantity.
+        per_share_cost = price * (margin_pct / 100.0)
+        """
+        if price <= 0 or margin_pct <= 0:
+            return 1
+        per_share_cost = price * (margin_pct / 100.0)
+        return max(1, int(self.cfg["capital"] * self.cfg["max_trade_value_pct"] // per_share_cost))
 
     def _cost_buy(self, price: float, qty: int) -> float:
         """INR transaction costs on the BUY side."""
@@ -785,7 +851,7 @@ class OrderManager:
 
     # ── entry ─────────────────────────────────────────────────────────────────
 
-    def enter_trade(self, symbol: str, token: str, entry_px: float) -> bool:
+    def enter_trade(self, symbol: str, token: str, entry_px: float, margin_pct: Optional[float] = None) -> bool:
         """
         Place a limit BUY at entry_px (= local_low + 1 tick from pullback detector).
         In dry-run: log the would-be order and simulate success.
@@ -794,10 +860,17 @@ class OrderManager:
             if self.state != OrderState.IDLE:
                 return False
 
+            if margin_pct is None:
+                if self.margin_cache:
+                    margin_pct = self.margin_cache.get_margin_pct(token)
+                else:
+                    margin_pct = float(self.cfg.get("fallback_margin_pct", 20.0))
+
             entry = self._round(entry_px)
-            qty = self._qty(entry)
+            qty = self._qty(entry, margin_pct)
             tp = self._tp(entry, qty)
             sl = self._sl(entry, qty)
+            leverage = 100.0 / margin_pct if margin_pct > 0 else 1.0
 
             if not (self.cfg["min_stock_price"] <= entry <= self.cfg["max_stock_price"]):
                 log.warning("[SKIP] {} price {:.2f} out of bounds.".format(symbol, entry))
@@ -811,9 +884,10 @@ class OrderManager:
 
             if self.cfg.get("dry_run"):
                 log.info(
-                    "[DRY-RUN] WOULD BUY {}  Qty={}  Entry={:.2f}  TP={:.2f}  SL={:.2f}  "
+                    "[DRY-RUN] WOULD BUY {}  Qty={} (margin={:.1f}%, ~{:.1f}x leverage)  "
+                    "Entry={:.2f}  TP={:.2f}  SL={:.2f}  "
                     "CostBuy=INR{:.2f}  CostSell=INR{:.2f}  NetTarget=INR{}".format(
-                        symbol, qty, entry, tp, sl,
+                        symbol, qty, margin_pct, leverage, entry, tp, sl,
                         cost_b, cost_s, self.cfg["target_profit_inr"],
                     )
                 )
@@ -822,9 +896,10 @@ class OrderManager:
                 return True
 
             log.info(
-                "[ENTRY] BUY {}  Qty={}  Entry={:.2f}  TP={:.2f}  SL={:.2f}  "
+                "[ENTRY] BUY {}  Qty={} (margin={:.1f}%, ~{:.1f}x leverage)  "
+                "Entry={:.2f}  TP={:.2f}  SL={:.2f}  "
                 "CostBuy=INR{:.2f}  CostSell=INR{:.2f}  NetTarget=INR{}".format(
-                    symbol, qty, entry, tp, sl,
+                    symbol, qty, margin_pct, leverage, entry, tp, sl,
                     cost_b, cost_s, self.cfg["target_profit_inr"],
                 )
             )
@@ -1430,7 +1505,8 @@ class AlgoTrader:
         self.ledger = TradeLedger()
         self.session = SessionState()
         self.signals = SignalEngine(self.cfg)
-        self.orders = OrderManager(self.api, self.cfg, self.ledger, self.session, self.ticks)
+        self.margin_cache = MarginCache(self.api, self.cfg)
+        self.orders = OrderManager(self.api, self.cfg, self.ledger, self.session, self.ticks, self.margin_cache)
         self.board = CandidateBoard(board_size=self.cfg.get("board_size", 5))
         self.registry: Optional[SymbolRegistry] = None
         self._running = threading.Event()
@@ -1655,13 +1731,14 @@ class AlgoTrader:
                 continue
 
             # Re-validation passed! Fast-fire entry
+            margin_pct = self.margin_cache.get_margin_pct(token)
             if rank == 1:
                 log.info("[FAST-FIRE rank=1] {} entry={:.2f}".format(sym, live_entry_px))
             else:
                 reasons_str = "; ".join(skipped_reasons)
                 log.info("[FAST-FIRE rank={}] {} -- {}".format(rank, sym, reasons_str))
 
-            if self.orders.enter_trade(symbol=sym, token=token, entry_px=live_entry_px):
+            if self.orders.enter_trade(symbol=sym, token=token, entry_px=live_entry_px, margin_pct=margin_pct):
                 return
 
         log.info("[SCAN] entire board stale/invalid, running fresh scan")
@@ -1724,7 +1801,8 @@ class AlgoTrader:
             )
             return
 
-        self.orders.enter_trade(symbol=best_tsym, token=best_token, entry_px=best_entry)
+        margin_pct = self.margin_cache.get_margin_pct(best_token)
+        self.orders.enter_trade(symbol=best_tsym, token=best_token, entry_px=best_entry, margin_pct=margin_pct)
 
     # ── main run loop  (item 5: reconnect built into main thread)  ───────────
 
