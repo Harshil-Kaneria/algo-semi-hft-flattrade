@@ -1,3 +1,8 @@
 NorenRestApiPy
+requests
+websocket-client
+pyotp
+backports.zoneinfo; python_version < "3.9"
 numpy
 python-dotenv
+

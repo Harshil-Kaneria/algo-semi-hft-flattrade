@@ -1,7 +1,12 @@
+http://161.118.186.210/
+
 ssh ubuntu@161.118.186.210
 
 cd /opt/hft/algo-semi-hft-flattrade
 git pull
+
+# Install:
+/opt/hft/venv/bin/pip install -r requirements.txt
 
 # Run:
 /opt/hft/venv/bin/python get_token.py
