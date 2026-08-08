@@ -62,6 +62,7 @@ except ImportError:
         from backports.zoneinfo import ZoneInfo  # type: ignore
     except ImportError:
         ZoneInfo = None  # type: ignore
+        # Deferred fatal — logged after the logging system is initialised (see below).
 
 # ── third-party ───────────────────────────────────────────────────────────────
 try:
@@ -106,6 +107,19 @@ _load_env()
 IST: Optional[object] = ZoneInfo("Asia/Kolkata") if ZoneInfo is not None else None
 
 
+def _assert_zoneinfo() -> None:
+    """Call once after logging is configured.  Exits if IST timezone is unavailable."""
+    if IST is None:
+        # logging.basicConfig has already run by this point.
+        logging.getLogger("HFT-TRADER").error(
+            "[FATAL] Neither 'zoneinfo' nor 'backports.zoneinfo' is available. "
+            "IST timezone cannot be determined — market-hours checks, square-off "
+            "timing, and the daily kill-switch reset will ALL be broken. "
+            "Install backports.zoneinfo:  pip install backports.zoneinfo"
+        )
+        sys.exit(1)
+
+
 def _now_ist() -> datetime:
     """Current datetime in IST (naive local fallback if zoneinfo missing)."""
     return datetime.now(IST) if IST else datetime.now()  # type: ignore[arg-type]
@@ -127,13 +141,16 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(
-            "trader_{}.log".format(_today_ist().strftime("%Y%m%d")),
+            str(Path(__file__).parent / "trader_{}.log".format(_today_ist().strftime("%Y%m%d"))),
             mode="a",
             encoding="utf-8",
         ),
     ],
 )
 log = logging.getLogger("HFT-TRADER")
+
+# Guard: exit early with a clear message if the IST timezone is unavailable.
+_assert_zoneinfo()
 
 
 # ============================================================
@@ -182,6 +199,13 @@ def load_config() -> Dict:
     except json.JSONDecodeError as exc:
         log.error("[CONFIG] trader_config.json is not valid JSON: {}".format(exc))
         sys.exit(1)
+
+    # ── Sentinel defaults (never reach the broker; catch missing credentials) ──
+    # If neither the .env nor an env-var provides these, the sentinel strings
+    # will cause the login call to fail with a clear error rather than sending
+    # an empty/null credential to the API.
+    cfg.setdefault("user_id", "YOUR_USER_ID")
+    cfg.setdefault("api_token", "YOUR_SESSION_TOKEN")
 
     # ── Overlay credentials from environment variables ─────────────────────────
     # Credentials live in .env ONLY — never in trader_config.json.
@@ -524,7 +548,7 @@ class TradeLedger:
     ]
 
     def __init__(self):
-        path = Path("trades_{}.csv".format(_today_ist().strftime("%Y%m%d")))
+        path = Path(__file__).parent / "trades_{}.csv".format(_today_ist().strftime("%Y%m%d"))
         self._path = path
         self._lock = threading.Lock()
         if not path.exists():
@@ -544,7 +568,7 @@ class TradeLedger:
 class SessionState:
     """Persists daily_pnl and trade_count across process restarts (same IST date)."""
 
-    _PATH = Path("session_state.json")
+    _PATH = Path(__file__).parent / "session_state.json"
 
     def load(self) -> Tuple[float, int]:
         """Return (daily_pnl, trade_count) for today, else (0.0, 0)."""
@@ -1247,7 +1271,7 @@ class SymbolRegistry:
         self.exch = exchange
         self._s2t: Dict[str, str] = {}
         self._t2s: Dict[str, str] = {}
-        cache = Path("symbol_cache.json")
+        cache = Path(__file__).parent / "symbol_cache.json"
         if cache.exists():
             try:
                 d = json.loads(cache.read_text(encoding="utf-8"))
