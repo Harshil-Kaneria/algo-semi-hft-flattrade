@@ -349,8 +349,8 @@ class FlattradeClient(NorenApi):
 
     def __init__(self):
         super().__init__(
-            host="https://piconnect.flattrade.in/NorenWClientTP/",
-            websocket="wss://piconnect.flattrade.in/NorenWSTP/",
+            host="https://piconnect.flattrade.in/PiConnectAPI/",
+            websocket="wss://piconnect.flattrade.in/PiConnectWSAPI/",
         )
 
 
@@ -1512,6 +1512,7 @@ class AlgoTrader:
         self._running = threading.Event()
         self._running.set()
         self._ws_open = threading.Event()
+        self._ws_closed_event = threading.Event()
         self._t2base: Dict[str, str] = {}
         self._t2tsym: Dict[str, str] = {}
         self._n50 = self.cfg["nifty50_token"]
@@ -1593,11 +1594,18 @@ class AlgoTrader:
     def _on_close(self) -> None:
         log.warning("[WS] Disconnected.")
         self._ws_open.clear()
+        if hasattr(self.api, "_NorenApi__stop_event"):
+            try:
+                self.api._NorenApi__stop_event.set()
+            except Exception:
+                pass
+        self._ws_closed_event.set()
 
     # ── WebSocket connect helper ───────────────────────────────────────────────
 
     def _connect_ws(self) -> None:
-        """Blocking call: starts WS and returns when connection drops."""
+        """Blocking call: starts WS and blocks until connection drops."""
+        self._ws_closed_event.clear()
         self.api.start_websocket(
             order_update_callback=self._on_order_update,
             subscribe_callback=self._on_quote,
@@ -1605,6 +1613,7 @@ class AlgoTrader:
             socket_error_callback=self._on_error,
             socket_close_callback=self._on_close,
         )
+        self._ws_closed_event.wait()
 
     # ── strategy loop ─────────────────────────────────────────────────────────
 
@@ -1846,6 +1855,19 @@ class AlgoTrader:
         max_att = self.cfg.get("ws_max_reconnect_attempts", 10)
 
         while self._running.is_set():
+            if self._reconnect_attempts > 0:
+                delay = min(2 ** self._reconnect_attempts * 2, 120)
+                log.warning(
+                    "[WS RECONNECT] attempt {}/{}  waiting {}s before retry...".format(
+                        self._reconnect_attempts, max_att, delay
+                    )
+                )
+                deadline = time.time() + delay
+                while time.time() < deadline and self._running.is_set():
+                    time.sleep(0.2)
+                if not self._running.is_set():
+                    break
+
             log.info("[WS] Connecting...")
             try:
                 self._connect_ws()   # blocks until WS disconnects
@@ -1874,17 +1896,6 @@ class AlgoTrader:
                 # way to terminate from here (which may be a non-main thread context
                 # indirectly, but more importantly guarantees no hung threads).
                 os._exit(1)
-
-            delay = min(2 ** self._reconnect_attempts * 2, 120)
-            log.warning(
-                "[WS RECONNECT] attempt {}/{}  waiting {}s before retry...".format(
-                    self._reconnect_attempts, max_att, delay
-                )
-            )
-            # Interruptible sleep — honour _running.clear() from _shutdown
-            deadline = time.time() + delay
-            while time.time() < deadline and self._running.is_set():
-                time.sleep(0.2)
 
         strat.join(timeout=5)
 
