@@ -34,5 +34,7 @@
     "stamp_duty_buy_pct": 0.003,
     "ws_max_reconnect_attempts": 10,
     "reconcile_interval_sec": 10,
+    "board_size": 5,
+    "board_log_interval_sec": 10,
     "dry_run": true
 }

@@ -21,6 +21,7 @@ What's new in v2
  8. Session state persistence (session_state.json); IST timezone throughout
  9. Nifty-500 universe fetched live from NSE archives CSV at startup
 10. dry_run flag: simulates all order logic against live ticks, no real orders
+11. Background candidate board (CandidateBoard): continuously updated top-N leaderboard of trade candidates; fast-fire entry with live re-validation
 
 Credentials
 -----------
@@ -206,6 +207,8 @@ def load_config() -> Dict:
     # an empty/null credential to the API.
     cfg.setdefault("user_id", "YOUR_USER_ID")
     cfg.setdefault("api_token", "YOUR_SESSION_TOKEN")
+    cfg.setdefault("board_size", 5)
+    cfg.setdefault("board_log_interval_sec", 10)
 
     # ── Overlay credentials from environment variables ─────────────────────────
     # Credentials live in .env ONLY — never in trader_config.json.
@@ -382,6 +385,66 @@ class TickStore:
     def tick_count(self, token: str) -> int:
         with self._lock:
             return len(self._prices[token])
+
+
+# ============================================================
+# CANDIDATE BOARD  (item 11)
+# ============================================================
+
+class CandidateBoard:
+    """
+    Thread-safe leaderboard holding top N trade candidates ranked by score.
+    Updated continuously on every strategy tick in the background.
+    """
+
+    def __init__(self, board_size: int = 5):
+        self.board_size = board_size
+        self._board: list = []
+        self._lock = threading.Lock()
+        self._last_log_time = 0.0
+
+    def update(self, candidates: list) -> None:
+        """
+        candidates: list of dicts with {symbol, token, score, entry_price}
+        Sorts by score descending, keeps top board_size, assigns rank 1..N.
+        """
+        now = time.time()
+        sorted_cand = sorted(candidates, key=lambda c: c["score"], reverse=True)[: self.board_size]
+        new_board = []
+        for idx, c in enumerate(sorted_cand, 1):
+            new_board.append({
+                "rank": idx,
+                "symbol": c["symbol"],
+                "token": c["token"],
+                "score": float(c["score"]),
+                "entry_price": float(c["entry_price"]),
+                "updated_at": now,
+            })
+        with self._lock:
+            self._board = new_board
+
+    def get_board(self) -> list:
+        with self._lock:
+            return list(self._board)
+
+    def log_board_if_due(self, interval_sec: float) -> None:
+        now = time.time()
+        with self._lock:
+            if now - self._last_log_time < interval_sec:
+                return
+            self._last_log_time = now
+            board_copy = list(self._board)
+
+        if not board_copy:
+            return
+
+        parts = [
+            "#{} {} score={:.3f} entry={:.2f}".format(
+                item["rank"], item["symbol"], item["score"], item["entry_price"]
+            )
+            for item in board_copy
+        ]
+        log.info("[BOARD] {}".format(" | ".join(parts)))
 
 
 # ============================================================
@@ -1368,6 +1431,7 @@ class AlgoTrader:
         self.session = SessionState()
         self.signals = SignalEngine(self.cfg)
         self.orders = OrderManager(self.api, self.cfg, self.ledger, self.session, self.ticks)
+        self.board = CandidateBoard(board_size=self.cfg.get("board_size", 5))
         self.registry: Optional[SymbolRegistry] = None
         self._running = threading.Event()
         self._running.set()
@@ -1487,6 +1551,9 @@ class AlgoTrader:
         if not is_market_open(self.cfg):
             return
 
+        # Always update candidate board on every strategy tick
+        self._update_board()
+
         state = self.orders.state
 
         if state == OrderState.ENTRY_PENDING:
@@ -1505,7 +1572,100 @@ class AlgoTrader:
             return
 
         if state == OrderState.IDLE and self.orders.is_ready():
+            self._try_board_or_scan()
+
+    def _update_board(self) -> None:
+        """Run candidate-finding logic across ALL qualifying stocks and update CandidateBoard."""
+        n50_trend = self.signals.trend(self.ticks.prices(self._n50))
+        if n50_trend != "UP":
+            self.board.update([])
+            self.board.log_board_if_due(self.cfg.get("board_log_interval_sec", 10))
+            return
+
+        candidates = []
+        for token, base_sym in self._t2base.items():
+            if token == self._n50:
+                continue
+            if self.ticks.tick_count(token) < self.cfg["min_ticks_for_signal"]:
+                continue
+            ltp = self.ticks.ltp(token)
+            if ltp is None or ltp < self.cfg["min_stock_price"]:
+                continue
+            prices = self.ticks.prices(token)
+
+            # Gate 2: pullback condition
+            pb_ok, entry_px = self.signals.pullback_entry(prices, self.cfg["tick_size"])
+            if not pb_ok:
+                continue
+
+            sc = self.signals.score(prices, self.ticks.volumes(token))
+            if sc <= 0.01:
+                continue
+
+            # Gate 3: stock's own trend must also be UP (dual trend filter)
+            stock_trend = self.signals.trend(prices)
+            if stock_trend != "UP":
+                continue
+
+            tsym = self._t2tsym.get(token, base_sym)
+            candidates.append({
+                "symbol": tsym,
+                "token": token,
+                "score": sc,
+                "entry_price": entry_px,
+            })
+
+        self.board.update(candidates)
+        self.board.log_board_if_due(self.cfg.get("board_log_interval_sec", 10))
+
+    def _try_board_or_scan(self) -> None:
+        """
+        When OrderManager is IDLE and ready:
+        Attempt fast-fire by re-validating ranked candidates from CandidateBoard.
+        Falls back to fresh _scan_and_trade() if board is empty or all candidates fail re-validation.
+        """
+        board = self.board.get_board()
+        if not board:
+            log.debug("[SCAN] board empty, running fresh scan")
             self._scan_and_trade()
+            return
+
+        n50_trend = self.signals.trend(self.ticks.prices(self._n50))
+        if n50_trend != "UP":
+            log.debug("[SCAN] Nifty-50 trend is {}, skipping fast-fire.".format(n50_trend))
+            self._scan_and_trade()
+            return
+
+        skipped_reasons = []
+        for cand in board:
+            token = cand["token"]
+            sym = cand["symbol"]
+            rank = cand["rank"]
+            prices = self.ticks.prices(token)
+
+            # Live re-validation against current tick buffer
+            stock_trend = self.signals.trend(prices)
+            if stock_trend != "UP":
+                skipped_reasons.append("rank {} ({}) failed re-validation (trend flipped)".format(rank, sym))
+                continue
+
+            pb_ok, live_entry_px = self.signals.pullback_entry(prices, self.cfg["tick_size"])
+            if not pb_ok:
+                skipped_reasons.append("rank {} ({}) failed re-validation (pullback invalid)".format(rank, sym))
+                continue
+
+            # Re-validation passed! Fast-fire entry
+            if rank == 1:
+                log.info("[FAST-FIRE rank=1] {} entry={:.2f}".format(sym, live_entry_px))
+            else:
+                reasons_str = "; ".join(skipped_reasons)
+                log.info("[FAST-FIRE rank={}] {} -- {}".format(rank, sym, reasons_str))
+
+            if self.orders.enter_trade(symbol=sym, token=token, entry_px=live_entry_px):
+                return
+
+        log.info("[SCAN] entire board stale/invalid, running fresh scan")
+        self._scan_and_trade()
 
     def _scan_and_trade(self) -> None:
         # Gate 1: Nifty-50 must be trending UP
