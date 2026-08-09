@@ -223,6 +223,7 @@ def load_config() -> Dict:
         "FLATTRADE_USER_ID":   "user_id",
         "FLATTRADE_API_TOKEN": "api_token",
         "FLATTRADE_API_KEY":   "api_key",
+        "FLATTRADE_API_SECRET":"api_secret",
     }
     for env_var, cfg_key in env_map.items():
         val = os.environ.get(env_var, "").strip()
