@@ -346,13 +346,31 @@ def get_universe() -> list:
 # ============================================================
 
 class FlattradeClient(NorenApi):
-    """NorenApi subclass with Flattrade-specific endpoints."""
+    """NorenApi subclass with Flattrade-specific endpoints and v2 WebSocket handshake."""
 
     def __init__(self):
         super().__init__(
             host="https://piconnect.flattrade.in/PiConnectAPI/",
             websocket="wss://piconnect.flattrade.in/PiConnectWSAPI/",
         )
+
+    def _NorenApi__on_open_callback(self, ws=None):
+        """Override NorenApi __on_open_callback to send Flattrade v2 't': 'a' & 'accesstoken' payload."""
+        self._NorenApi__websocket_connected = True
+
+        values = {
+            "t": "a",
+            "uid": self._NorenApi__username,
+            "actid": self._NorenApi__username,
+            "source": "API",
+            "accesstoken": self._NorenApi__susertoken,
+        }
+
+        payload = json.dumps(values)
+        self._NorenApi__ws_send(payload)
+
+        if self._NorenApi__on_open:
+            self._NorenApi__on_open()
 
 
 # ============================================================
