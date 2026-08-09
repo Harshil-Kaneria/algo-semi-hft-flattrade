@@ -1435,6 +1435,13 @@ class SymbolRegistry:
                 continue
             try:
                 ret = self.api.searchscrip(exchange=self.exch, searchtext=sym)
+                if isinstance(ret, dict) and ret.get("stat") == "Not_Ok":
+                    log.error(
+                        "[REGISTRY] searchscrip failed for {}: {}. Aborting symbol resolution.".format(
+                            sym, ret.get("emsg", ret)
+                        )
+                    )
+                    break
                 if ret and ret.get("stat") == "Ok" and ret.get("values"):
                     for v in ret["values"]:
                         if v.get("tsym", "").upper() == tsym.upper():
@@ -1527,11 +1534,25 @@ class AlgoTrader:
         uid = self.cfg["user_id"]
         tok = self.cfg["api_token"]
         if uid == "YOUR_USER_ID" or tok == "YOUR_SESSION_TOKEN":
-            log.error("Set credentials in {} then re-run.".format(CONFIG_FILE))
+            log.error("Set credentials in {} or .env then re-run.".format(CONFIG_FILE))
             sys.exit(1)
-        ret = self.api.set_session(userid=uid, password="", usertoken=tok)
-        if ret is None:
-            log.error("Auth failed — check user_id and api_token.")
+        self.api.set_session(userid=uid, password="", usertoken=tok)
+
+        # Validate session token with a fast REST API call before proceeding
+        limits = self.api.get_limits()
+        if limits is None or (isinstance(limits, dict) and limits.get("stat") == "Not_Ok"):
+            emsg = (
+                limits.get("emsg", "Invalid or expired session token")
+                if isinstance(limits, dict)
+                else "No response from API"
+            )
+            log.error(
+                "[AUTH FATAL] Flattrade session token validation failed for user {}: {}.\n"
+                "  → Your daily session token (FLATTRADE_API_TOKEN) is expired or invalid.\n"
+                "  → Run `python get_token.py` to refresh your token in .env, then restart.".format(
+                    uid, emsg
+                )
+            )
             sys.exit(1)
         log.info("[AUTH] Authenticated as {}".format(uid))
 
@@ -1589,7 +1610,14 @@ class AlgoTrader:
             self.orders.on_ws_order_event(msg)
 
     def _on_error(self, msg) -> None:
-        log.error("[WS ERROR] {}".format(msg))
+        msg_str = str(msg)
+        log.error("[WS ERROR] {}".format(msg_str))
+        if "NOT_OK" in msg_str or "404" in msg_str or "Handshake status 404" in msg_str:
+            log.warning(
+                "[WS AUTH WARNING] WebSocket authentication failed ({})!\n"
+                "  → Your daily Flattrade session token (FLATTRADE_API_TOKEN) may be expired or invalid.\n"
+                "  → Run `python get_token.py` to refresh your token in .env, then restart.".format(msg_str)
+            )
 
     def _on_close(self) -> None:
         log.warning("[WS] Disconnected.")
